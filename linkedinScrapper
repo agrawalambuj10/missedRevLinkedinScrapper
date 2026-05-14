@@ -12,11 +12,11 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ==============================
 
 APIFY_TOKEN = ""
-ACTOR_ID = "vOp9KqY3dI4ES"
+ACTOR_ID = ""
 
 COOKIES = [
-    "li_at=AQEDATvmCpcjlYGjL2AKsCJiLoOiy8ba4CBO7OQsbMH8HeIXzx2KKfHas2m36qD56CEdKZyp_eRmCuXDmRAurFPosh121vx",
-    "JSESSIONID=ajax:3722337435"
+    "li_at=",
+    "JSESSIONID=ajax:"
 ]
 
 # Airtable source (company list)
@@ -27,7 +27,7 @@ AIRTABLE_SOURCE_VIEW = "Grid view copy"
 AIRTABLE_SOURCE_COLUMN = "companyLinkedin"
 
 # Airtable destination (results go here)
-AIRTABLE_RESULTS_BASE_ID = "appCxlPq3KESw8Pqc"
+AIRTABLE_RESULTS_BASE_ID = ""
 AIRTABLE_RESULTS_TABLE = "employeeResults"
 
 # ==============================
