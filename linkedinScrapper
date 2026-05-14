@@ -1,0 +1,328 @@
+
+import requests
+import time
+import urllib3
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Suppress SSL warnings since we're using verify=False
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# ==============================
+# CONFIG
+# ==============================
+
+APIFY_TOKEN = ""
+ACTOR_ID = "vOp9KqY3dI4ES"
+
+COOKIES = [
+    "li_at=AQEDATvmCpcjlYGjL2AKsCJiLoOiy8ba4CBO7OQsbMH8HeIXzx2KKfHas2m36qD56CEdKZyp_eRmCuXDmRAurFPosh121vx",
+    "JSESSIONID=ajax:3722337435"
+]
+
+# Airtable source (company list)
+AIRTABLE_TOKEN = ""
+AIRTABLE_BASE_ID = ""
+AIRTABLE_SOURCE_TABLE = "companiesList"
+AIRTABLE_SOURCE_VIEW = "Grid view copy"
+AIRTABLE_SOURCE_COLUMN = "companyLinkedin"
+
+# Airtable destination (results go here)
+AIRTABLE_RESULTS_BASE_ID = "appCxlPq3KESw8Pqc"
+AIRTABLE_RESULTS_TABLE = "employeeResults"
+
+# ==============================
+# HOW MANY COMPANIES IN PARALLEL
+# ==============================
+MAX_WORKERS = 5  # Increase to 8-10 if your machine can handle it
+
+
+# ==============================
+# FETCH COMPANIES FROM AIRTABLE
+# ==============================
+
+def fetch_companies_from_airtable():
+    print("📋 Fetching company list from Airtable...")
+
+    companies = []
+    offset = None
+
+    while True:
+        url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_SOURCE_TABLE}"
+        params = {
+            "view": AIRTABLE_SOURCE_VIEW,
+            "fields[]": AIRTABLE_SOURCE_COLUMN,
+            "pageSize": 100
+        }
+        if offset:
+            params["offset"] = offset
+
+        headers = {"Authorization": f"Bearer {AIRTABLE_TOKEN}"}
+        res = requests.get(url, headers=headers, params=params)  # Airtable is fine with SSL
+        data = res.json()
+
+        if res.status_code != 200:
+            print(f"❌ Airtable error: {data}")
+            return []
+
+        for record in data.get("records", []):
+            field_value = record.get("fields", {}).get(AIRTABLE_SOURCE_COLUMN, "")
+            if field_value:
+                url_clean = field_value.strip().rstrip("/")
+                companies.append({"url": url_clean + "/people", "record_id": record["id"]})
+
+        offset = data.get("offset")
+        if not offset:
+            break
+
+    print(f"✅ Found {len(companies)} companies in Airtable")
+    return companies
+
+
+# ==============================
+# MARK COMPANY AS DONE (CHECKBOX)
+# ==============================
+
+def mark_company_as_done(record_id):
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_SOURCE_TABLE}/{record_id}"
+    headers = {
+        "Authorization": f"Bearer {AIRTABLE_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {"fields": {"check": True}}
+    res = requests.patch(url, headers=headers, json=payload)
+    if res.status_code == 200:
+        print(f"  ✅ Marked company as done in Airtable")
+    else:
+        print(f"  ❌ Failed to mark company: {res.json()}")
+
+
+# ==============================
+# CREATE RESULTS TABLE IF NEEDED
+# ==============================
+
+def ensure_results_table_exists():
+    print(f"🔧 Checking if '{AIRTABLE_RESULTS_TABLE}' table exists...")
+
+    url = f"https://api.airtable.com/v0/meta/bases/{AIRTABLE_RESULTS_BASE_ID}/tables"
+    headers = {"Authorization": f"Bearer {AIRTABLE_TOKEN}"}
+    res = requests.get(url, headers=headers)
+    data = res.json()
+
+    existing_tables = [t["name"] for t in data.get("tables", [])]
+
+    if AIRTABLE_RESULTS_TABLE in existing_tables:
+        print(f"✅ Table '{AIRTABLE_RESULTS_TABLE}' already exists")
+        return True
+
+    print(f"➕ Creating table '{AIRTABLE_RESULTS_TABLE}'...")
+    url = f"https://api.airtable.com/v0/meta/bases/{AIRTABLE_RESULTS_BASE_ID}/tables"
+    headers = {
+        "Authorization": f"Bearer {AIRTABLE_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "name": AIRTABLE_RESULTS_TABLE,
+        "fields": [
+            {"name": "name",             "type": "singleLineText"},
+            {"name": "linkedin",         "type": "url"},
+            {"name": "jobTitle",         "type": "singleLineText"},
+            {"name": "companyName",      "type": "singleLineText"},
+            {"name": "companyId",        "type": "singleLineText"},
+            {"name": "location",         "type": "singleLineText"},
+            {"name": "sourceCompanyUrl", "type": "url"},
+        ]
+    }
+
+    res = requests.post(url, headers=headers, json=payload)
+    if res.status_code == 200:
+        print(f"✅ Table '{AIRTABLE_RESULTS_TABLE}' created successfully")
+        return True
+    else:
+        print(f"❌ Failed to create table: {res.json()}")
+        return False
+
+
+# ==============================
+# PUSH RESULTS TO AIRTABLE
+# ==============================
+
+def push_to_airtable(results, company_url):
+    if not results:
+        print(f"  ⚠️ No results to push for {company_url}")
+        return
+
+    url = f"https://api.airtable.com/v0/{AIRTABLE_RESULTS_BASE_ID}/{AIRTABLE_RESULTS_TABLE}"
+    headers = {
+        "Authorization": f"Bearer {AIRTABLE_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+    batch_size = 10
+    total_pushed = 0
+
+    for i in range(0, len(results), batch_size):
+        batch = results[i:i + batch_size]
+
+        records = []
+        for r in batch:
+            records.append({
+                "fields": {
+                    "name":             str(r.get("fullName") or r.get("name") or ""),
+                    "linkedin":         str(r.get("profileUrl") or r.get("url") or ""),
+                    "jobTitle":         str(r.get("jobTitle") or ""),
+                    "companyName":      str(r.get("companyName") or r.get("company") or ""),
+                    "companyId":        str(r.get("companyId") or r.get("companyUniversalName") or ""),
+                    "location":         str(r.get("location") or ""),
+                    "sourceCompanyUrl": company_url
+                }
+            })
+
+        payload = {"records": records}
+        res = requests.post(url, headers=headers, json=payload)
+
+        if res.status_code == 200:
+            total_pushed += len(batch)
+            print(f"  📤 Pushed {total_pushed}/{len(results)} records for {company_url}...")
+        else:
+            print(f"  ❌ Failed to push batch: {res.json()}")
+
+        time.sleep(0.3)
+
+    print(f"  ✅ Done pushing {total_pushed} employees for {company_url}")
+
+
+# ==============================
+# RUN ACTOR FOR ONE COMPANY
+# ==============================
+
+def run_actor(company_url):
+    url = f"https://api.apify.com/v2/acts/{ACTOR_ID}/runs?token={APIFY_TOKEN}"
+
+    payload = {
+        "cookies": COOKIES,
+        "startUrls": [{"url": company_url}],
+        "maxItems": 1000,
+        "proxyConfiguration": {
+            "useApifyProxy": True,
+            "apifyProxyGroups": ["RESIDENTIAL"]
+        },
+        "minDelay": 3,
+        "maxDelay": 15
+    }
+
+    res = requests.post(url, json=payload, verify=False)  # ✅ SSL fix
+    data = res.json()
+
+    if res.status_code != 201:
+        print(f"  ❌ Failed to start actor: {data}")
+        return None
+
+    run_id = data["data"]["id"]
+    print(f"  ▶️  Started run {run_id} for {company_url}")
+    return run_id
+
+
+# ==============================
+# WAIT FOR RUN TO FINISH
+# ==============================
+
+def wait_for_run(run_id, timeout=600):
+    url = f"https://api.apify.com/v2/actor-runs/{run_id}?token={APIFY_TOKEN}"
+
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            res = requests.get(url, verify=False)  # ✅ SSL fix
+            data = res.json()
+            status = data["data"]["status"]
+
+            if status == "SUCCEEDED":
+                return data["data"]["defaultDatasetId"]
+            elif status in ("FAILED", "ABORTED", "TIMED-OUT"):
+                print(f"  ❌ Run {run_id} failed with status: {status}")
+                return None
+
+            print(f"  ⏳ Run {run_id} status: {status} — waiting...")
+            time.sleep(10)
+
+        except Exception as e:
+            print(f"  ⚠️ Error checking run {run_id}: {e} — retrying in 10s...")
+            time.sleep(10)
+
+    print(f"  ⚠️ Run {run_id} timed out")
+    return None
+
+
+# ==============================
+# FETCH RESULTS FROM APIFY
+# ==============================
+
+def fetch_results(dataset_id):
+    url = f"https://api.apify.com/v2/datasets/{dataset_id}/items?token={APIFY_TOKEN}&format=json"
+    res = requests.get(url, verify=False)  # ✅ SSL fix
+    return res.json()
+
+
+# ==============================
+# PROCESS A SINGLE COMPANY
+# ==============================
+
+def process_company(company, index, total):
+    company_url = company["url"]
+    record_id = company["record_id"]
+
+    print(f"\n[{index}/{total}] Starting: {company_url}")
+
+    run_id = run_actor(company_url)
+    if not run_id:
+        return
+
+    dataset_id = wait_for_run(run_id)
+    if not dataset_id:
+        return
+
+    results = fetch_results(dataset_id)
+    print(f"  ✅ [{index}/{total}] Got {len(results)} employees for {company_url}")
+
+    mark_company_as_done(record_id)
+    push_to_airtable(results, company_url)
+
+
+# ==============================
+# MAIN
+# ==============================
+
+def main():
+    # Step 1: Get companies from Airtable
+    companies = fetch_companies_from_airtable()
+    if not companies:
+        print("No companies found. Check your Airtable config.")
+        return
+
+    # Step 2: Make sure results table exists in destination base
+    if not ensure_results_table_exists():
+        print("Could not create/find results table. Exiting.")
+        return
+
+    total = len(companies)
+    print(f"\n🚀 Processing {total} companies with {MAX_WORKERS} parallel workers...\n")
+
+    # Step 3: Process companies in parallel
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {
+            executor.submit(process_company, company, i + 1, total): company
+            for i, company in enumerate(companies)
+        }
+
+        for future in as_completed(futures):
+            company = futures[future]
+            try:
+                future.result()
+            except Exception as e:
+                print(f"  ❌ Error processing {company['url']}: {e}")
+
+    print(f"\n🎉 All done! All employees saved to Airtable → '{AIRTABLE_RESULTS_TABLE}' table in base '{AIRTABLE_RESULTS_BASE_ID}'")
+
+
+if __name__ == "__main__":
+    main()
