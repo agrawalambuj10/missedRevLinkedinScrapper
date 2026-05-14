@@ -1,0 +1,97 @@
+// ==============================
+// LOAD BOTH TABLES
+// ==============================
+const table3 = base.getTable("missed rev check");  // companies table
+const table2 = base.getTable("scrappedEmployees");  // employees table
+
+output.markdown("## 📋 Loading data from both tables...");
+
+// Load Grid view 3 with companyLinkedin + employeeScrapper linked field
+const records3 = await table3.selectRecordsAsync({
+    fields: ["companyLinkedin", "employeeScrapper"]
+});
+
+// Load Grid view 2 with companyLinkedin + publicIdentifier + match
+const records2 = await table2.selectRecordsAsync({
+    fields: ["companyLinkedin", "publicIdentifier", "match 2"]
+});
+
+output.markdown(`✅ Grid view 3: ${records3.records.length} companies`);
+output.markdown(`✅ Grid view 2: ${records2.records.length} employees`);
+
+// ==============================
+// BUILD LOOKUP MAP FROM Grid view 2
+// companyLinkedin → list of {id, publicIdentifier}
+// ==============================
+const companyEmployeeMap = {};
+
+for (const record of records2.records) {
+    const companyUrl = record.getCellValueAsString("companyLinkedin").trim().toLowerCase();
+    const pubId = record.getCellValueAsString("publicIdentifier").trim().toLowerCase();
+
+    if (!companyUrl || !pubId) continue;
+
+    if (!companyEmployeeMap[companyUrl]) {
+        companyEmployeeMap[companyUrl] = [];
+    }
+
+    companyEmployeeMap[companyUrl].push({
+        id: record.id,
+        publicIdentifier: pubId
+    });
+}
+
+output.markdown(`✅ Built lookup map for ${Object.keys(companyEmployeeMap).length} unique companies`);
+
+// ==============================
+// MATCH LOGIC
+// ==============================
+output.markdown("## 🔄 Matching records...");
+
+let totalMatched = 0;
+let totalChecked = 0;
+
+for (const company of records3.records) {
+    const companyUrl = company.getCellValueAsString("companyLinkedin").trim().toLowerCase();
+    
+    // Get linked employeeScrapper records
+    const linkedEmployees = company.getCellValue("employeeScrapper");
+    
+    if (!companyUrl || !linkedEmployees || linkedEmployees.length === 0) continue;
+
+    // Get publicIdentifiers from linked records in Grid view 3
+    const linkedPubIds = new Set();
+    for (const emp of linkedEmployees) {
+        // emp.name contains the record name which is publicIdentifier in linked table
+        const pubId = emp.name.trim().toLowerCase();
+        // extract just the publicIdentifier part (before " in ")
+        const cleanId = pubId.includes(" in ") ? pubId.split(" in ")[0].trim() : pubId;
+        linkedPubIds.add(cleanId);
+    }
+
+    // Find matching records in Grid view 2 for this company
+    const employeesInTable2 = companyEmployeeMap[companyUrl] || [];
+
+    const matchUpdates = [];
+
+    for (const emp of employeesInTable2) {
+        totalChecked++;
+        if (linkedPubIds.has(emp.publicIdentifier)) {
+            matchUpdates.push(emp.id);
+            totalMatched++;
+        }
+    }
+
+    // Update match checkbox for matched records one by one
+    for (const recordId of matchUpdates) {
+        await table2.updateRecordAsync(recordId, {
+            "match 2": true
+        });
+    }
+
+    output.markdown(`✅ ${companyUrl}: ${matchUpdates.length}/${employeesInTable2.length} matched`);
+}
+
+output.markdown(`## 🎉 Done!`);
+output.markdown(`- **Total checked:** ${totalChecked}`);
+output.markdown(`- **Total matched:** ${totalMatched}`);
